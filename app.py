@@ -11,6 +11,10 @@ from itertools import cycle
 from concurrent.futures import ThreadPoolExecutor
 from keys import OPENROUTER_KEYS
 
+# ===============================
+# TESSERACT PATH (Docker)
+# ===============================
+
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = FastAPI(title="Document Classification API")
@@ -20,47 +24,93 @@ app = FastAPI(title="Document Classification API")
 # ===============================
 
 BASE_OUTPUT = "output"
-MAX_WORKERS = len(OPENROUTER_KEYS)
-
-executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-key_cycle = cycle(OPENROUTER_KEYS)
 
 CATEGORIES = [
-   
-    "Bank Statement",
-
-    "Medical Report",
+    "Bank Account",
+    "Medical",
     "Other"
 ]
 
 for cat in CATEGORIES:
     os.makedirs(os.path.join(BASE_OUTPUT, cat), exist_ok=True)
 
+MAX_WORKERS = len(OPENROUTER_KEYS)
+executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+key_cycle = cycle(OPENROUTER_KEYS)
+
 PROMPT = """
 You are a document classification assistant.
 
-Classify the document into one of the following:
-- Receipt
-- Invoice
-- Bank Statement
-- ID Document
-- Medical Report
+Classify the document into exactly one of these categories:
+
+- Bank Account
+- Medical
 - Other
 
-Return only the document type.
+Return only one label exactly as written above.
 
 OCR TEXT:
 """
 
-
 # ===============================
-# BLOCKING FUNCTIONS
+# OCR
 # ===============================
 
 def run_ocr(image_path: str) -> str:
     image = Image.open(image_path)
     return pytesseract.image_to_string(image)
 
+
+# ===============================
+# CATEGORY NORMALIZATION
+# ===============================
+
+import re
+import unicodedata
+
+
+def clean_text(text: str) -> str:
+    text = text.lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def normalize_category(text: str) -> str:
+    text = clean_text(text)
+
+    bank_keywords = [
+        "bank", "statement", "account",
+        "transaction", "transferred", "transfer",
+        "payment", "paid", "utility", "bill",
+        "amount", "fee", "balance",
+        "jazzcash", "easypaisa", "paytm",
+        "upi", "credit", "debit"
+    ]
+
+    medical_keywords = [
+        "medical", "hospital", "laboratory",
+        "lab", "report", "cbc", "blood",
+        "hematology", "pathology",
+        "patient", "diagnosis", "test result"
+    ]
+
+    bank_score = sum(1 for k in bank_keywords if k in text)
+    medical_score = sum(1 for k in medical_keywords if k in text)
+
+    if medical_score >= 2:
+        return "Medical"
+
+    if bank_score >= 2:
+        return "Bank Account"
+
+    return "Other"
+
+# ===============================
+# OPENROUTER CLASSIFICATION
+# ===============================
 
 def classify_text(text: str) -> str:
     api_key = next(key_cycle)
@@ -73,23 +123,22 @@ def classify_text(text: str) -> str:
         },
         json={
             "model": "deepseek/deepseek-r1-0528:free",
-            "messages": [{"role": "user", "content": PROMPT + text}],
+            "messages": [
+                {"role": "user", "content": PROMPT + text}
+            ],
             "temperature": 0
         },
         timeout=90
     )
 
     result = response.json()
-    category = result["choices"][0]["message"]["content"].strip()
+    raw_label = result["choices"][0]["message"]["content"].strip()
 
-    if category not in CATEGORIES:
-        category = "Other"
-
-    return category
+    return normalize_category(raw_label + " " + text)
 
 
 # ===============================
-# PIPELINE FOR ONE IMAGE
+# IMAGE PIPELINE
 # ===============================
 
 def process_single_image(file: UploadFile):
@@ -98,10 +147,7 @@ def process_single_image(file: UploadFile):
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # OCR
     ocr_text = run_ocr(temp_path)
-
-    # Classification
     category = classify_text(ocr_text)
 
     final_path = os.path.join(BASE_OUTPUT, category, file.filename)
@@ -131,7 +177,6 @@ async def classify_documents(files: list[UploadFile] = File(...)):
 
     results = await asyncio.gather(*tasks)
 
-    # save json
     json_path = os.path.join(BASE_OUTPUT, "results.json")
 
     if os.path.exists(json_path):
