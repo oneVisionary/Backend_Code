@@ -11,6 +11,8 @@ from itertools import cycle
 from concurrent.futures import ThreadPoolExecutor
 from keys import OPENROUTER_KEYS
 
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
 app = FastAPI(title="Document Classification API")
 
 # ===============================
