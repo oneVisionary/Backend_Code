@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: document-classifier
+    env: python
+    plan: free
+
+    aptPackages:
+      - tesseract-ocr
+
+    buildCommand: pip install -r requirements.txt
+
+    startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
